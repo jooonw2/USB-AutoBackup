@@ -1,59 +1,100 @@
+# Carpeta base de backups
+$backupBase = "C:\USBBackups"
 
-# USB-AutoBackup
+# Asegurar que exista
+if (!(Test-Path -Path $backupBase)) {
+    New-Item -Path $backupBase -ItemType Directory
+}
 
-Script desarrollado en **PowerShell** para automatizar las copias de seguridad de dispositivos USB en Windows.
+# Función para copiar contenido y generar logs
+function Copy-USBContent {
+    param (
+        [string]$sourceDrive,
+        [string]$label,
+        [string]$fileSystem,
+        [uint64]$size,
+        [uint64]$freeSpace
+    )
 
-Cuando se conecta un USB, el script detecta el evento e inicia la copia de sus archivos a una carpeta local. También genera un informe con información del dispositivo y del proceso.
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $folderName = "$($label)_$timestamp"
+    $destination = Join-Path -Path $backupBase -ChildPath $folderName
+    New-Item -Path $destination -ItemType Directory | Out-Null
 
-## Características
+    # Medir tiempo de inicio
+    $startTime = Get-Date
 
-- Detección de conexiones USB mediante WMI.
-- Copia recursiva de archivos y subcarpetas.
-- Inclusión de archivos ocultos accesibles.
-- Creación de carpetas con fecha y hora.
-- Generación de informes con información del USB, número de archivos, tiempo de copia y resumen por extensiones.
+    # Obtener todos los archivos (incluso ocultos y de sistema), ordenados por tamaño
+    $files = Get-ChildItem -Path "$sourceDrive\" -Recurse -File -Force -ErrorAction SilentlyContinue | Sort-Object Length
 
-## Tecnologías utilizadas
+    foreach ($file in $files) {
+        $relativePath = $file.FullName.Substring($sourceDrive.Length)
+        $targetPath = Join-Path $destination $relativePath
+        $targetDir = Split-Path $targetPath
 
-- PowerShell
-- Windows
-- WMI (Windows Management Instrumentation)
+        if (!(Test-Path $targetDir)) {
+            New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+        }
 
-## Instalación y uso
+        Copy-Item -Path $file.FullName -Destination $targetPath -Force -ErrorAction SilentlyContinue
+    }
 
-Clona el repositorio:
+    # Medir tiempo total
+    $endTime = Get-Date
+    $elapsedTime = $endTime - $startTime
+    $elapsedSeconds = [math]::Round($elapsedTime.TotalSeconds, 2)
 
-```bash
-git clone https://github.com/jooonw2/USB-AutoBackup.git
-cd USB-AutoBackup
-```
+    # Generar resumen de tipos de archivo
+    $summary = $files | Group-Object Extension | Sort-Object Count -Descending | ForEach-Object {
+        "{0,-10} {1,5} archivos" -f $_.Name, $_.Count
+    }
 
-Configura la carpeta de destino modificando la variable `$backupBase` del script. Por defecto, las copias se guardan en `C:\USBBackups`.
+    # Guardar información del USB y del proceso
+    $infoPath = Join-Path $destination "info_usb.txt"
 
-Ejecuta el script desde PowerShell:
+    $usbInfo = @"
+Fecha/Hora:       $(Get-Date)
+Unidad:           $sourceDrive
+Etiqueta:         $label
+Sistema de Arch.: $fileSystem
+Tamaño Total:     $([math]::Round($size / 1GB, 2)) GB
+Espacio Libre:    $([math]::Round($freeSpace / 1GB, 2)) GB
+Total Archivos:   $($files.Count)
+Tiempo Copia:     $elapsedSeconds segundos
+Destino Backup:   $destination
 
-```powershell
-.\usb_autocopy.ps1
-```
+Resumen por tipo de archivo:
+-----------------------------
+$($summary -join "`n")
+"@
 
-El script permanecerá activo escuchando conexiones USB. Para detenerlo, pulsa `Ctrl + C`.
+    $usbInfo | Out-File -FilePath $infoPath -Encoding UTF8
+}
 
-## Ejemplo de resultado
+# Monitor de conexión USB
+Register-WmiEvent -Class Win32_VolumeChangeEvent -Action {
+    $event = $Event.SourceEventArgs.NewEvent
+    if ($event.EventType -eq 2) {
+        Start-Sleep -Seconds 2  # Esperar montaje
 
-```text
-C:\USBBackups\
-└── MI_USB_20261028_120000\
-    ├── documento.pdf
-    ├── imagen.jpg
-    └── info_usb.txt
-```
+        $usb = Get-WmiObject Win32_Volume | Where-Object { $_.DriveType -eq 2 -and $_.DriveLetter -ne $null } | Select-Object -First 1
 
-El archivo `info_usb.txt` contiene información del dispositivo y estadísticas del proceso de copia.
+        if ($usb) {
+            $driveLetter = $usb.DriveLetter
+            $label = if ($usb.Label) { $usb.Label } else { "USB" }
+            $fileSystem = $usb.FileSystem
+            $size = $usb.Capacity
+            $free = $usb.FreeSpace
 
-## Limitaciones
+            Copy-USBContent -sourceDrive "$driveLetter\" -label $label -fileSystem $fileSystem -size $size -freeSpace $free
+        }
+    }
+}
 
-Esta versión inicial puede seleccionar una unidad distinta de la recién conectada y no registra individualmente todos los errores de copia. Tampoco verifica la integridad de los archivos mediante hashes.
+# Mantener el script vivo para escuchar eventos
+Write-Output "⏳ Esperando conexión de dispositivos USB... (Ctrl + C para salir)"
 
-## Uso responsable
+while ($true) {
+    Start-Sleep -Seconds 10
+}
 
-Utiliza este script únicamente con dispositivos propios o con autorización para acceder a su contenido. Protege los respaldos que contengan información sensible.
